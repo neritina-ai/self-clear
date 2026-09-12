@@ -61,12 +61,13 @@ waiting for it or killing it over handing it over.
 
 ## Step 3 — invoke
 
-This skill is a native binary, `self-clear`, installed on `PATH`. Two forms.
+The skill is a small Go program in this skill's `scripts/` directory, run
+straight from source — nothing is installed or pre-built.
 
 With a resume prompt, read from stdin:
 
 ```bash
-self-clear - <<'EOF'
+go -C $HOME/.claude/skills/self-clear/scripts run . - <<'EOF'
 read next-session.md and continue from the "Next steps" section
 EOF
 ```
@@ -74,8 +75,15 @@ EOF
 Without one — the fresh session is prompted with `continue`:
 
 ```bash
-self-clear
+go -C $HOME/.claude/skills/self-clear/scripts run .
 ```
+
+Use either line exactly as written; nothing in it needs to be substituted.
+`$HOME` is expanded by both PowerShell and the Bash tool, and `go -C` enters the
+skill's own directory, so the command works from wherever the session happens to
+be and is unaffected by the Go version the current project pins. Should this
+skill ever be installed somewhere other than the path above, use the base
+directory reported when it loaded.
 
 If this skill was invoked with an argument, that argument is the resume prompt;
 pass it through the stdin form. Use the bare form only when the handover lives
@@ -85,11 +93,14 @@ somewhere the fresh session picks up by itself (project memory, `CLAUDE.md`,
 The prompt is read from **stdin** (the `-` form), not an argument — this avoids
 shell quoting, escaping, and length limits. Prefer the Bash-tool heredoc shown
 above; piping a prompt that contains CJK or special characters through
-PowerShell 5.1 can mangle the encoding. A bare `self-clear` never reads stdin,
+PowerShell 5.1 can mangle the encoding. The form without `-` never reads stdin,
 so it won't block waiting for input. Keep the prompt to one line and short —
 point at the handover file rather than restating it.
 
-The binary prints three lines once `/clear` is queued in Claude Code's input:
+The first run compiles the program, which takes a few seconds; Go caches the
+build, so later runs take about a third of a second.
+
+The program prints three lines once `/clear` is queued in Claude Code's input:
 
 ```
 target claude pid=<N>
@@ -100,24 +111,36 @@ sidekick spawned (windowless, background); it will prompt the fresh session in 8
 ## Step 4 — end your turn immediately
 
 `/clear` is processed by Claude Code once your current turn ends, and the
-sidekick types the resume prompt 8 seconds later. So after the binary returns:
-stop. No further tool calls, no closing summary — anything you say now is wiped
-along with everything else, and work done past that point can collide with the
-clear. End the turn, and pick the thread back up in the fresh session.
+sidekick types the resume prompt 8 seconds later. So as soon as you see those
+three lines: stop. No further tool calls, no closing summary — anything you say
+now is wiped along with everything else, and work done past that point can
+collide with the clear. End the turn, and pick the thread back up in the fresh
+session.
 
 ## Troubleshooting
 
-**`command not found` / `self-clear is not recognized`** — the binary isn't
-installed, or isn't on `PATH`.
+**`go: command not found` / `'go' is not recognized`** — [Go](https://go.dev/dl/)
+1.21 or newer must be installed and on `PATH`.
+
+**Check the target without clearing.** This resolves the hosting console and
+reports what it would do, injecting nothing:
+
+```bash
+go -C $HOME/.claude/skills/self-clear/scripts run . --dry-run
+```
+
+**`no claude.exe ancestor found`** — the command isn't running as a descendant of
+a console-hosted `claude.exe`. Sessions started with `claude --bg` live behind a
+private ConPTY and cannot be reached; note that injecting into one of those
+reports success while nothing actually happens.
 
 **Nothing arrives after the clear** — the sidekick's log is at
-`%TEMP%\self-clear-sidekick.log`; it records the injected prompt or the failure.
-The session is idle, not broken: the user can simply type the prompt.
+`%LOCALAPPDATA%\self-clear\sidekick.log`; it records the injected prompt or the
+failure. The session is idle, not broken: the user can simply type the prompt.
 
-**A stuck sidekick** can be listed and killed with:
+If a stuck sidekick needs to be killed:
 
 ```powershell
-Get-CimInstance Win32_Process -Filter "Name='self-clear.exe'" |
-  Where-Object { $_.CommandLine -like '*sidekick*' } |
+Get-CimInstance Win32_Process -Filter "Name='self-clear-sidekick.exe'" |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
 ```

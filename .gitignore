@@ -1,14 +1,9 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-.uv/
 .idea/
 .vscode/
 *.log
 
-# Go build artifact
-self-clear.exe
+# Go build artifacts
+*.exe
 
 # Local-only working files
 .claude/settings.local.json

@@ -29,59 +29,63 @@ background shells and subagents that outlive the context which started them.
 
 - **Windows.** Injection uses Win32 console APIs (`AttachConsole` /
   `WriteConsoleInputW`). macOS/Linux are not supported.
-- **Claude Code running in a console** (Windows Terminal or legacy conhost).
-  Works even when Claude Code runs elevated.
-- **[Go](https://go.dev/dl/) 1.26+** to install the binary, with `~/go/bin` on
-  your `PATH`.
-- **[Node.js](https://nodejs.org/)** to run `npx skills` for the skill half.
+- **Claude Code**, running in a console (Windows Terminal or legacy conhost).
+  Works even when Claude Code runs elevated. No other agent will do: the program
+  locates its host by walking up the process tree to a `claude.exe` ancestor, and
+  the whole design rests on Claude Code queueing an injected slash command until
+  the current turn ends.
+- **[Go](https://go.dev/dl/) 1.21+** on your `PATH`. The skill runs from source
+  with `go run`; there is no separate binary to install or keep up to date.
+- **[Node.js](https://nodejs.org/)** to run `npx skills` for the install.
 
 ## Install
-
-Two components, installed separately: the binary and the skill.
-
-**1. Install the `self-clear` binary** (puts `self-clear.exe` in `~/go/bin`):
-
-```
-go install github.com/neritina-ai/self-clear/cmd/self-clear@latest
-```
-
-Make sure `~/go/bin` (the default `GOBIN`) is on your `PATH` so the skill can
-find `self-clear`. To verify it runs, type `self-clear` in a terminal **outside**
-a Claude Code session — it should print `no claude.exe ancestor found`, which
-confirms the binary works. (Inside a session it would do the real thing.)
-
-**2. Install the `self-clear` skill:**
-
-```
-npx skills add neritina-ai/self-clear
-```
-
-The [skills CLI](https://github.com/vercel-labs/skills) will ask which agents to
-install into and whether to install globally; pick Claude Code. To skip the
-prompts:
 
 ```
 npx skills add neritina-ai/self-clear --skill self-clear -a claude-code -g -y
 ```
+
+The [skills CLI](https://github.com/vercel-labs/skills) can install a skill into
+any agent it knows about; the flags above pin it to a global Claude Code
+install, which is the only one this skill can work in. Repeat the `-g` on the
+update and uninstall commands below: without it they act on the current project
+instead, and `remove` reports that there is nothing to remove.
 
 That drops the skill in `~/.claude/skills/self-clear/`. The next session picks
 it up, and the model uses it when the description matches — or you can invoke it
 directly with `/self-clear` (optionally followed by the resume prompt for the
 fresh session).
 
+Nothing is compiled at install time. The first invocation runs `go run .` on
+`scripts/self-clear.go`, which takes a few seconds; Go caches the build, so
+later invocations take about a third of a second.
+
 ### To update
 
 ```
-go install github.com/neritina-ai/self-clear/cmd/self-clear@latest
-npx skills update self-clear
+npx skills update self-clear -g
 ```
+
+Go rebuilds by itself whenever the source changes, so there is no second step.
 
 ### To uninstall
 
 ```
-npx skills remove self-clear
-rm ~/go/bin/self-clear.exe
+npx skills remove self-clear -g
 ```
+
+Everything self-clear writes lives in one directory, which nothing else uses and
+which you can delete at any time:
+
+```powershell
+Remove-Item -Recurse -Force $env:LOCALAPPDATA\self-clear
+```
+
+### Coming from the two-part install
+
+self-clear used to ship as a `go install`ed binary plus a separately installed
+skill. Both are replaced by the single `npx skills add` above, so remove the old
+pieces: `npx skills remove self-clear -g`, then `rm ~/go/bin/self-clear.exe`
+(and `rm $env:TEMP\self-clear-sidekick.log`, the log's old home).
 
 ## Usage
 
@@ -96,13 +100,13 @@ version. In short — the model:
 3. Invokes the skill, with or without a resume prompt:
 
    ```bash
-   self-clear - <<'EOF'
+   go -C $HOME/.claude/skills/self-clear/scripts run . - <<'EOF'
    read next-session.md and continue from the "Next steps" section
    EOF
    ```
 
    ```bash
-   self-clear
+   go -C $HOME/.claude/skills/self-clear/scripts run .
    ```
 
    The bare form resumes the fresh session with `continue`, which only works if
@@ -112,7 +116,7 @@ version. In short — the model:
 ## How it works
 
 1. Walk the current process's parent chain to the hosting `claude.exe` (the
-   binary runs as a descendant: `claude.exe → shell → self-clear`).
+   program runs as a descendant: `claude.exe → shell → go run → self-clear`).
 2. `FreeConsole()` → `AttachConsole(claude_pid)` → open `CONIN$` →
    `WriteConsoleInputW()` the keystrokes `/clear` + Enter straight into that
    console's input buffer. No window focus, foreground switch, IME, or clipboard
@@ -121,22 +125,39 @@ version. In short — the model:
 3. The slash command lands in Claude Code's input and takes effect once the
    current model turn ends — which is why the skill tells the model to **end its
    turn immediately after invoking**.
-4. The binary spawns itself as a detached, windowless sidekick
-   (`DETACHED_PROCESS | CREATE_NO_WINDOW`), handing it the resolved pid and the
-   resume prompt. The sidekick waits 8 seconds — long enough for the turn to end
-   and the clear to happen — then injects the prompt, which arrives as the fresh
-   session's first user message. It logs to `%TEMP%\self-clear-sidekick.log`.
+4. The program copies its own executable to
+   `%LOCALAPPDATA%\self-clear\self-clear-sidekick.exe` and starts that copy
+   detached and windowless (`DETACHED_PROCESS | CREATE_NO_WINDOW`), handing it
+   the resolved pid and the resume prompt. The sidekick waits 8 seconds — long
+   enough for the turn to end and the clear to happen — then injects the prompt,
+   which arrives as the fresh session's first user message. It logs to
+   `sidekick.log` in that same directory.
 
 Locating the host by process ancestry (rather than enumerating windows) is what
 makes the injection focus-free and elevation-tolerant. The resume prompt is
 handed to the sidekick rather than re-derived, because once the main process
 exits, the ancestry chain back to `claude.exe` is broken.
 
+The sidekick runs from a copy because the program cannot count on its own
+executable outliving it. Whenever the source has changed, `go run` links into a
+fresh temporary directory and deletes it the moment the program exits: a sidekick
+started from there would hold that file open, `go run`'s cleanup would fail, and
+the command would exit non-zero even though the injection had worked. When the
+source is unchanged Go runs the linked executable straight out of its build
+cache, which does survive — but the program has no way to tell the two cases
+apart, and the build cache is not somewhere anything should be spawned from in
+any event. So it keeps its own copy. That copy is a single file, rewritten on
+each run; copying ~2 MB costs about 3 ms.
+
 ## Caveats
 
 - **Windows only.** No macOS/Linux support.
 - **The context is really gone.** There is no summary and no undo. If the
   handover was not written first, the run resumes with nothing to go on.
+- **Sessions started with `claude --bg` cannot be reached.** They live behind a
+  private ConPTY; `AttachConsole` still succeeds, so the injection reports
+  success while nothing actually happens. Only a Claude Code with its own console
+  can be injected into.
 - **Pending text in the input box at injection time:** the typed `/clear` is
   appended after whatever is already there, so the input no longer starts with
   `/` and Claude Code treats it as a normal message instead of a slash command.
@@ -152,11 +173,18 @@ exits, the ancestry chain back to `claude.exe` is broken.
 
 ## Development
 
-Build and install locally from a clone:
+The skill is a single Go file, `skills/self-clear/scripts/self-clear.go`, with no
+dependencies beyond the Windows standard library. Install a working copy straight
+from a clone:
 
 ```
-go install ./cmd/self-clear
 npx skills add . --skill self-clear -a claude-code -g -y
+```
+
+To check that it can find the host console without actually clearing anything:
+
+```
+go -C skills/self-clear/scripts run . --dry-run
 ```
 
 Written by **Claude Opus 5.0** (model ID `claude-opus-5`), Anthropic's Claude
